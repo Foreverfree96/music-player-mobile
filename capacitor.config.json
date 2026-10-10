@@ -1,0 +1,10 @@
+{
+  "appId": "com.musicplayer.mobile",
+  "appName": "Music Remote",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true,
+    "allowNavigation": ["*"]
+  }
+}
