@@ -199,7 +199,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRemote } from './composables/useRemote.js'
 
 const {
@@ -224,6 +224,11 @@ const tabs = [
   { id: 'albums', label: 'Albums' },
   { id: 'artists', label: 'Artists' },
 ]
+
+// Auto-connect if we have a saved IP
+onMounted(() => {
+  if (ipInput.value.trim()) doConnect()
+})
 
 const progressPercent = computed(() => {
   if (!duration.value) return 0
