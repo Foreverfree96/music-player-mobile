@@ -3,6 +3,7 @@ import { Filesystem, Directory } from '@capacitor/filesystem'
 
 const connected = ref(false)
 const connecting = ref(false)
+const connectError = ref('')
 const pcIP = ref(localStorage.getItem('mp-pc-ip') || '')
 const wsPort = ref(9525)
 const httpPort = ref(9526)
@@ -23,11 +24,10 @@ const currentIndex = ref(-1)
 // Local audio for phone playback
 const audio = new Audio()
 audio.crossOrigin = 'anonymous'
-let localPlaying = false
 
 let ws = null
 let reconnectTimer = null
-let progressTimer = null
+let hasConnectedOnce = false // only auto-reconnect after a successful connection
 
 function baseURL() {
   return `http://${pcIP.value}:${httpPort.value}`
@@ -46,12 +46,32 @@ function connect(ip) {
   pcIP.value = ip
   localStorage.setItem('mp-pc-ip', ip)
   connecting.value = true
+  connectError.value = ''
 
-  ws = new WebSocket(`ws://${ip}:${wsPort.value}`)
+  try {
+    ws = new WebSocket(`ws://${ip}:${wsPort.value}`)
+  } catch (e) {
+    connecting.value = false
+    connectError.value = 'Failed to create connection'
+    return
+  }
+
+  // Timeout - if not connected after 6s, give up
+  const connectTimeout = setTimeout(() => {
+    if (!connected.value) {
+      connecting.value = false
+      connectError.value = 'Connection timed out. Check IP and that desktop app is running.'
+      try { ws.close() } catch {}
+      ws = null
+    }
+  }, 6000)
 
   ws.onopen = () => {
+    clearTimeout(connectTimeout)
     connected.value = true
     connecting.value = false
+    connectError.value = ''
+    hasConnectedOnce = true
     console.log('[remote] Connected to desktop')
   }
 
@@ -92,25 +112,37 @@ function connect(ip) {
   }
 
   ws.onclose = () => {
+    clearTimeout(connectTimeout)
+    const wasConnected = connected.value
     connected.value = false
     connecting.value = false
-    console.log('[remote] Disconnected')
-    // Auto-reconnect after 3s
-    reconnectTimer = setTimeout(() => {
-      if (pcIP.value) connect(pcIP.value)
-    }, 3000)
+
+    // Only auto-reconnect if we were previously connected (lost connection)
+    if (wasConnected || hasConnectedOnce) {
+      console.log('[remote] Disconnected, reconnecting in 3s...')
+      reconnectTimer = setTimeout(() => {
+        if (pcIP.value) connect(pcIP.value)
+      }, 3000)
+    }
   }
 
-  ws.onerror = () => {
-    connecting.value = false
+  ws.onerror = (e) => {
+    clearTimeout(connectTimeout)
+    console.error('[remote] WebSocket error:', e)
+    if (!connected.value) {
+      connecting.value = false
+      connectError.value = 'Connection failed. Make sure the desktop app is running and you\'re on the same WiFi.'
+    }
   }
 }
 
 function disconnect() {
+  hasConnectedOnce = false
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
   if (ws) { ws.close(); ws = null }
   connected.value = false
   connecting.value = false
+  connectError.value = ''
 }
 
 // Update local progress when phone is playing
@@ -182,12 +214,25 @@ const downloadTotal = ref(0)
 const downloadCurrent = ref('')
 const downloadCancelled = ref(false)
 
+// Track downloaded songs in localStorage so we remember across sessions
+function getDownloadedSet() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem('mp-downloaded') || '[]'))
+  } catch { return new Set() }
+}
+
+function saveDownloadedSet(set) {
+  localStorage.setItem('mp-downloaded', JSON.stringify([...set]))
+}
+
 async function downloadAll() {
   if (!library.value.length || downloading.value) return
   downloading.value = true
   downloadProgress.value = 0
   downloadTotal.value = library.value.length
   downloadCancelled.value = false
+
+  const downloaded = getDownloadedSet()
 
   // Create Music folder
   try {
@@ -197,25 +242,37 @@ async function downloadAll() {
   for (const song of library.value) {
     if (downloadCancelled.value) break
     downloadCurrent.value = song.title
+
+    // Skip if already downloaded (tracked in localStorage)
+    const songKey = `${song.artist}|||${song.title}|||${song.id}`
+    if (downloaded.has(songKey)) {
+      downloadProgress.value++
+      continue
+    }
+
     try {
       const ext = song.path ? song.path.split('.').pop() : 'mp3'
       const safeName = `${song.artist} - ${song.title}`.replace(/[<>:"/\\|?*]/g, '_')
       const fileName = `Music/${safeName}.${ext}`
 
-      // Check if already downloaded
+      // Also check filesystem in case it exists but wasn't tracked
       try {
         await Filesystem.stat({ path: fileName, directory: Directory.Documents })
+        downloaded.add(songKey)
+        saveDownloadedSet(downloaded)
         downloadProgress.value++
-        continue // skip, already exists
+        continue
       } catch {}
 
       const response = await fetch(`${baseURL()}/audio/${song.id}`)
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const blob = await response.blob()
 
       // Convert blob to base64
-      const base64 = await new Promise((resolve) => {
+      const base64 = await new Promise((resolve, reject) => {
         const reader = new FileReader()
         reader.onloadend = () => resolve(reader.result.split(',')[1])
+        reader.onerror = reject
         reader.readAsDataURL(blob)
       })
 
@@ -224,6 +281,10 @@ async function downloadAll() {
         data: base64,
         directory: Directory.Documents,
       })
+
+      // Track as downloaded
+      downloaded.add(songKey)
+      saveDownloadedSet(downloaded)
     } catch (e) {
       console.error(`[download] Failed: ${song.title}`, e)
     }
@@ -241,7 +302,7 @@ function cancelDownload() {
 export function useRemote() {
   return {
     // Connection
-    connected, connecting, pcIP, connect, disconnect,
+    connected, connecting, connectError, pcIP, connect, disconnect,
     // State
     library, currentTrack, isPlaying, progress, duration,
     volume, shuffled, repeatMode, activeDevice, queueLength, currentIndex,

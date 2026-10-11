@@ -203,7 +203,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRemote } from './composables/useRemote.js'
 
 const {
-  connected, connecting, pcIP, connect, disconnect,
+  connected, connecting, connectError, pcIP, connect, disconnect,
   library, currentTrack, isPlaying, progress, duration,
   volume, shuffled, repeatMode, activeDevice, queueLength,
   togglePlayPause, next, prev, seek, setVolume,
@@ -215,7 +215,6 @@ const {
 } = useRemote()
 
 const ipInput = ref(pcIP.value)
-const connectError = ref('')
 const showPlayer = ref(false)
 const activeTab = ref('songs')
 const detailView = ref(null)
@@ -238,14 +237,7 @@ const progressPercent = computed(() => {
 function doConnect() {
   const ip = ipInput.value.trim()
   if (!ip) return
-  connectError.value = ''
   connect(ip)
-  // Check after 5s if still not connected
-  setTimeout(() => {
-    if (!connected.value && connecting.value) {
-      connectError.value = 'Could not connect. Make sure the desktop app is running and you\'re on the same WiFi.'
-    }
-  }, 5000)
 }
 
 function openDetail(name, songs) {
