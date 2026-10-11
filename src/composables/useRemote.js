@@ -256,6 +256,10 @@ function connect(rawIp) {
           const audioSrc = `${baseURL()}/audio/${s.currentTrack.id}`
           if (audio.src !== audioSrc) {
             audio.src = audioSrc
+            // Seek to PC's position after loading
+            audio.addEventListener('loadedmetadata', () => {
+              if (s.progress > 0) audio.currentTime = s.progress
+            }, { once: true })
           }
           if (s.isPlaying && audio.paused) {
             audio.play().catch(() => {})
@@ -557,7 +561,7 @@ export function useRemote() {
     playAll: (startIndex) => send('playAll', { startIndex }),
     playNext: (songId) => send('playNext', { songId }),
     addToQueue: (songId) => send('addToQueue', { songId }),
-    transferTo: (device) => send('transfer', { device }),
+    transferTo: (device) => send('transfer', { device, time: progress.value }),
     // Playlists
     getPlaylists: () => send('getPlaylists'),
     createPlaylist: (name) => send('createPlaylist', { name }),
