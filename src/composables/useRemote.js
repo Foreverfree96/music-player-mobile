@@ -34,9 +34,11 @@ function baseURL() {
 }
 
 function send(action, data = {}) {
-  if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: 'command', action, data }))
-  }
+  if (!ws) { console.warn('[remote] send failed: no websocket'); return }
+  if (ws.readyState !== 1) { console.warn('[remote] send failed: ws state', ws.readyState); return }
+  const msg = JSON.stringify({ type: 'command', action, data })
+  console.log('[remote] sending:', action, data)
+  ws.send(msg)
 }
 
 function connect(rawIp) {
