@@ -32,6 +32,9 @@
         <template v-else>
           <h1>Music Remote</h1>
           <div class="header-right">
+            <button class="download-btn" @click="downloadAll()" :disabled="downloading || !library.length" title="Download all to phone">
+              ⬇
+            </button>
             <button class="device-toggle" :class="activeDevice" @click="toggleDevice()">
               {{ activeDevice === 'pc' ? '💻 PC' : '📱 Phone' }}
             </button>
@@ -136,6 +139,19 @@
         </div>
       </div>
 
+      <!-- Download Progress Overlay -->
+      <div v-if="downloading" class="download-overlay">
+        <div class="download-card">
+          <div class="download-title">Downloading Songs</div>
+          <div class="download-status">{{ downloadProgress }} / {{ downloadTotal }}</div>
+          <div class="download-current">{{ downloadCurrent }}</div>
+          <div class="download-bar-bg">
+            <div class="download-bar-fill" :style="{ width: (downloadTotal ? (downloadProgress / downloadTotal) * 100 : 0) + '%' }"></div>
+          </div>
+          <button class="download-cancel" @click="cancelDownload()">Cancel</button>
+        </div>
+      </div>
+
       <!-- Full Player Overlay -->
       <div v-if="showPlayer && currentTrack" class="player-overlay">
         <div class="player-header">
@@ -194,6 +210,8 @@ const {
   toggleShuffle, toggleRepeat, playTrack, transferTo, send,
   search, filteredSongs, albums, artists,
   formatTime, formatDuration,
+  downloading, downloadProgress, downloadTotal, downloadCurrent,
+  downloadAll, cancelDownload,
 } = useRemote()
 
 const ipInput = ref(pcIP.value)
@@ -493,4 +511,45 @@ button { font-family: inherit; }
   border-radius: 50%; background: var(--pink); cursor: pointer;
 }
 .vol-pct { font-size: 12px; color: var(--text-muted); width: 32px; text-align: right; }
+
+/* Download Button */
+.download-btn {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: rgba(255,20,147,0.15); border: 1px solid var(--pink);
+  color: var(--pink); font-size: 14px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.download-btn:disabled { opacity: 0.4; }
+
+/* Download Overlay */
+.download-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,0.85);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.download-card {
+  background: var(--bg-card); border-radius: 16px;
+  padding: 28px 24px; width: 100%; max-width: 340px;
+  text-align: center;
+}
+.download-title { font-size: 18px; font-weight: 700; margin-bottom: 12px; }
+.download-status { font-size: 24px; font-weight: 700; color: var(--pink); margin-bottom: 6px; }
+.download-current {
+  font-size: 13px; color: var(--text-muted); margin-bottom: 16px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.download-bar-bg {
+  height: 6px; background: #333; border-radius: 3px;
+  overflow: hidden; margin-bottom: 20px;
+}
+.download-bar-fill {
+  height: 100%; background: var(--pink); border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.download-cancel {
+  padding: 10px 28px; background: #333; border: none;
+  border-radius: 10px; color: var(--text); font-size: 14px;
+  font-weight: 600; cursor: pointer;
+}
 </style>

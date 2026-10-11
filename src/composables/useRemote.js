@@ -1,4 +1,5 @@
 import { ref, computed } from 'vue'
+import { Filesystem, Directory } from '@capacitor/filesystem'
 
 const connected = ref(false)
 const connecting = ref(false)
@@ -174,6 +175,69 @@ function formatDuration(ms) {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
+// ─── Download All ───
+const downloading = ref(false)
+const downloadProgress = ref(0)
+const downloadTotal = ref(0)
+const downloadCurrent = ref('')
+const downloadCancelled = ref(false)
+
+async function downloadAll() {
+  if (!library.value.length || downloading.value) return
+  downloading.value = true
+  downloadProgress.value = 0
+  downloadTotal.value = library.value.length
+  downloadCancelled.value = false
+
+  // Create Music folder
+  try {
+    await Filesystem.mkdir({ path: 'Music', directory: Directory.Documents, recursive: true })
+  } catch {}
+
+  for (const song of library.value) {
+    if (downloadCancelled.value) break
+    downloadCurrent.value = song.title
+    try {
+      const ext = song.path ? song.path.split('.').pop() : 'mp3'
+      const safeName = `${song.artist} - ${song.title}`.replace(/[<>:"/\\|?*]/g, '_')
+      const fileName = `Music/${safeName}.${ext}`
+
+      // Check if already downloaded
+      try {
+        await Filesystem.stat({ path: fileName, directory: Directory.Documents })
+        downloadProgress.value++
+        continue // skip, already exists
+      } catch {}
+
+      const response = await fetch(`${baseURL()}/audio/${song.id}`)
+      const blob = await response.blob()
+
+      // Convert blob to base64
+      const base64 = await new Promise((resolve) => {
+        const reader = new FileReader()
+        reader.onloadend = () => resolve(reader.result.split(',')[1])
+        reader.readAsDataURL(blob)
+      })
+
+      await Filesystem.writeFile({
+        path: fileName,
+        data: base64,
+        directory: Directory.Documents,
+      })
+    } catch (e) {
+      console.error(`[download] Failed: ${song.title}`, e)
+    }
+    downloadProgress.value++
+  }
+
+  downloading.value = false
+  downloadCurrent.value = ''
+}
+
+function cancelDownload() {
+  downloadCancelled.value = true
+}
+
 export function useRemote() {
   return {
     // Connection
@@ -199,5 +263,8 @@ export function useRemote() {
     // Helpers
     formatTime, formatDuration,
     baseURL,
+    // Download
+    downloading, downloadProgress, downloadTotal, downloadCurrent,
+    downloadAll, cancelDownload,
   }
 }
