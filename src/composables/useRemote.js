@@ -39,9 +39,12 @@ function send(action, data = {}) {
   }
 }
 
-function connect(ip) {
+function connect(rawIp) {
   if (ws) { ws.close(); ws = null }
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+
+  // Strip port/protocol if user included them
+  const ip = rawIp.replace(/^wss?:\/\//, '').replace(/:\d+$/, '').trim()
 
   pcIP.value = ip
   localStorage.setItem('mp-pc-ip', ip)
