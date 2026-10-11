@@ -27,25 +27,52 @@ audio.crossOrigin = 'anonymous'
 
 let ws = null
 let reconnectTimer = null
-let hasConnectedOnce = false // only auto-reconnect after a successful connection
+let hasConnectedOnce = false
+
+// ─── Smooth progress interpolation ───
+let lastServerProgress = 0
+let lastServerTime = 0
+let progressRAF = null
+
+function startProgressTick() {
+  if (progressRAF) return
+  function tick() {
+    if (isPlaying.value && activeDevice.value === 'pc') {
+      const elapsed = (Date.now() - lastServerTime) / 1000
+      progress.value = lastServerProgress + elapsed
+      if (duration.value && progress.value > duration.value) {
+        progress.value = duration.value
+      }
+    }
+    progressRAF = requestAnimationFrame(tick)
+  }
+  progressRAF = requestAnimationFrame(tick)
+}
+
+function stopProgressTick() {
+  if (progressRAF) {
+    cancelAnimationFrame(progressRAF)
+    progressRAF = null
+  }
+}
+
+// ─── Volume jitter prevention ───
+let volumeLocalUntil = 0 // timestamp: ignore server volume until this time
 
 function baseURL() {
   return `http://${pcIP.value}:${httpPort.value}`
 }
 
 function send(action, data = {}) {
-  if (!ws) { console.warn('[remote] send failed: no websocket'); return }
-  if (ws.readyState !== 1) { console.warn('[remote] send failed: ws state', ws.readyState); return }
-  const msg = JSON.stringify({ type: 'command', action, data })
-  console.log('[remote] sending:', action, data)
-  ws.send(msg)
+  if (!ws) return
+  if (ws.readyState !== 1) return
+  ws.send(JSON.stringify({ type: 'command', action, data }))
 }
 
 function connect(rawIp) {
   if (ws) { ws.close(); ws = null }
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
 
-  // Strip port/protocol if user included them
   const ip = rawIp.replace(/^wss?:\/\//, '').replace(/:\d+$/, '').trim()
 
   pcIP.value = ip
@@ -54,18 +81,15 @@ function connect(rawIp) {
   connectError.value = ''
 
   const wsUrl = `ws://${ip}:${wsPort.value}`
-  console.log('[remote] Connecting to', wsUrl)
 
   try {
     ws = new WebSocket(wsUrl)
   } catch (e) {
     connecting.value = false
     connectError.value = `Connection error: ${e.message || e}`
-    console.error('[remote] WebSocket constructor error:', e)
     return
   }
 
-  // Timeout - if not connected after 8s, give up
   const connectTimeout = setTimeout(() => {
     if (!connected.value) {
       connecting.value = false
@@ -81,7 +105,7 @@ function connect(rawIp) {
     connecting.value = false
     connectError.value = ''
     hasConnectedOnce = true
-    console.log('[remote] Connected to desktop')
+    startProgressTick()
   }
 
   ws.onmessage = (event) => {
@@ -93,16 +117,29 @@ function connect(rawIp) {
         const s = msg.data
         currentTrack.value = s.currentTrack
         isPlaying.value = s.isPlaying
-        progress.value = s.progress
         duration.value = s.duration
-        volume.value = s.volume
         shuffled.value = s.shuffled
         repeatMode.value = s.repeatMode
         activeDevice.value = s.activeDevice
         queueLength.value = s.queueLength || 0
         currentIndex.value = s.currentIndex ?? -1
 
-        // If phone is active device and track changed, start streaming
+        // Smooth progress: anchor from server, interpolate locally
+        if (activeDevice.value === 'pc') {
+          lastServerProgress = s.progress
+          lastServerTime = Date.now()
+          // Only hard-set progress if it drifted more than 2s (seek or track change)
+          if (Math.abs(progress.value - s.progress) > 2) {
+            progress.value = s.progress
+          }
+        }
+
+        // Volume: only accept server value if user isn't actively changing it
+        if (Date.now() > volumeLocalUntil) {
+          volume.value = s.volume
+        }
+
+        // Phone streaming
         if (s.activeDevice === 'phone' && s.currentTrack) {
           const audioSrc = `${baseURL()}/audio/${s.currentTrack.id}`
           if (audio.src !== audioSrc) {
@@ -125,10 +162,9 @@ function connect(rawIp) {
     const wasConnected = connected.value
     connected.value = false
     connecting.value = false
+    stopProgressTick()
 
-    // Only auto-reconnect if we were previously connected (lost connection)
     if (wasConnected || hasConnectedOnce) {
-      console.log('[remote] Disconnected, reconnecting in 3s...')
       reconnectTimer = setTimeout(() => {
         if (pcIP.value) connect(pcIP.value)
       }, 3000)
@@ -137,10 +173,9 @@ function connect(rawIp) {
 
   ws.onerror = (e) => {
     clearTimeout(connectTimeout)
-    console.error('[remote] WebSocket error:', e.message || e.type || e)
     if (!connected.value) {
       connecting.value = false
-      connectError.value = `Connection failed to ${ip}. Make sure the desktop app is running and you're on the same WiFi.`
+      connectError.value = `Connection failed to ${pcIP.value}. Make sure the desktop app is running and you're on the same WiFi.`
     }
   }
 }
@@ -152,6 +187,7 @@ function disconnect() {
   connected.value = false
   connecting.value = false
   connectError.value = ''
+  stopProgressTick()
 }
 
 // Update local progress when phone is playing
@@ -223,7 +259,6 @@ const downloadTotal = ref(0)
 const downloadCurrent = ref('')
 const downloadCancelled = ref(false)
 
-// Track downloaded songs in localStorage so we remember across sessions
 function getDownloadedSet() {
   try {
     return new Set(JSON.parse(localStorage.getItem('mp-downloaded') || '[]'))
@@ -243,7 +278,6 @@ async function downloadAll() {
 
   const downloaded = getDownloadedSet()
 
-  // Create Music folder
   try {
     await Filesystem.mkdir({ path: 'Music', directory: Directory.Documents, recursive: true })
   } catch {}
@@ -252,7 +286,6 @@ async function downloadAll() {
     if (downloadCancelled.value) break
     downloadCurrent.value = song.title
 
-    // Skip if already downloaded (tracked in localStorage)
     const songKey = `${song.artist}|||${song.title}|||${song.id}`
     if (downloaded.has(songKey)) {
       downloadProgress.value++
@@ -264,7 +297,6 @@ async function downloadAll() {
       const safeName = `${song.artist} - ${song.title}`.replace(/[<>:"/\\|?*]/g, '_')
       const fileName = `Music/${safeName}.${ext}`
 
-      // Also check filesystem in case it exists but wasn't tracked
       try {
         await Filesystem.stat({ path: fileName, directory: Directory.Documents })
         downloaded.add(songKey)
@@ -277,7 +309,6 @@ async function downloadAll() {
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const blob = await response.blob()
 
-      // Convert blob to base64
       const base64 = await new Promise((resolve, reject) => {
         const reader = new FileReader()
         reader.onloadend = () => resolve(reader.result.split(',')[1])
@@ -291,7 +322,6 @@ async function downloadAll() {
         directory: Directory.Documents,
       })
 
-      // Track as downloaded
       downloaded.add(songKey)
       saveDownloadedSet(downloaded)
     } catch (e) {
@@ -322,8 +352,17 @@ export function useRemote() {
     togglePlayPause: () => send('toggle'),
     next: () => send('next'),
     prev: () => send('prev'),
-    seek: (time) => send('seek', { time }),
-    setVolume: (v) => { send('setVolume', { volume: v }); volume.value = v },
+    seek: (time) => {
+      progress.value = time // instant local update
+      lastServerProgress = time
+      lastServerTime = Date.now()
+      send('seek', { time })
+    },
+    setVolume: (v) => {
+      volume.value = v
+      volumeLocalUntil = Date.now() + 1500 // ignore server volume for 1.5s
+      send('setVolume', { volume: v })
+    },
     toggleShuffle: () => send('toggleShuffle'),
     toggleRepeat: () => send('toggleRepeat'),
     playTrack: (songId) => send('playTrack', { songId }),
