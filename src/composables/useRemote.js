@@ -48,15 +48,19 @@ function connect(ip) {
   connecting.value = true
   connectError.value = ''
 
+  const wsUrl = `ws://${ip}:${wsPort.value}`
+  console.log('[remote] Connecting to', wsUrl)
+
   try {
-    ws = new WebSocket(`ws://${ip}:${wsPort.value}`)
+    ws = new WebSocket(wsUrl)
   } catch (e) {
     connecting.value = false
-    connectError.value = 'Failed to create connection'
+    connectError.value = `Connection error: ${e.message || e}`
+    console.error('[remote] WebSocket constructor error:', e)
     return
   }
 
-  // Timeout - if not connected after 6s, give up
+  // Timeout - if not connected after 8s, give up
   const connectTimeout = setTimeout(() => {
     if (!connected.value) {
       connecting.value = false
@@ -64,7 +68,7 @@ function connect(ip) {
       try { ws.close() } catch {}
       ws = null
     }
-  }, 6000)
+  }, 8000)
 
   ws.onopen = () => {
     clearTimeout(connectTimeout)
@@ -128,10 +132,10 @@ function connect(ip) {
 
   ws.onerror = (e) => {
     clearTimeout(connectTimeout)
-    console.error('[remote] WebSocket error:', e)
+    console.error('[remote] WebSocket error:', e.message || e.type || e)
     if (!connected.value) {
       connecting.value = false
-      connectError.value = 'Connection failed. Make sure the desktop app is running and you\'re on the same WiFi.'
+      connectError.value = `Connection failed to ${ip}. Make sure the desktop app is running and you're on the same WiFi.`
     }
   }
 }
