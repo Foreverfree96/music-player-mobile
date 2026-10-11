@@ -20,6 +20,8 @@ const repeatMode = ref('off')
 const activeDevice = ref('pc')
 const queueLength = ref(0)
 const currentIndex = ref(-1)
+const upNext = ref([])
+const playlists = ref([])
 
 // Local audio for phone playback
 const audio = new Audio()
@@ -57,7 +59,104 @@ function stopProgressTick() {
 }
 
 // ─── Volume jitter prevention ───
-let volumeLocalUntil = 0 // timestamp: ignore server volume until this time
+let volumeLocalUntil = 0
+
+// ─── Phone EQ (Web Audio API) ───
+const EQ_FREQUENCIES = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+const EQ_PRESETS = {
+  'Flat':         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  'Bass Boost':   [6, 5, 4, 2, 0, 0, 0, 0, 0, 0],
+  'Treble Boost': [0, 0, 0, 0, 0, 1, 2, 4, 5, 6],
+  'Rock':         [5, 4, 2, 0, -1, 0, 2, 3, 4, 4],
+  'Pop':          [-1, 1, 3, 4, 3, 0, -1, -1, 1, 2],
+  'Jazz':         [3, 2, 0, 1, -1, -1, 0, 1, 3, 4],
+  'Classical':    [4, 3, 2, 1, -1, -1, 0, 2, 3, 4],
+  'Electronic':   [5, 4, 2, 0, -2, 0, 1, 3, 4, 5],
+  'Vocal':        [-2, -1, 0, 2, 4, 4, 3, 1, 0, -1],
+  'Bass Cut':     [-6, -4, -2, 0, 0, 0, 0, 0, 0, 0],
+}
+
+const savedBands = JSON.parse(localStorage.getItem('mp-mobile-eq-bands') || 'null')
+const savedPreset = localStorage.getItem('mp-mobile-eq-preset') || 'Flat'
+const savedEnabled = localStorage.getItem('mp-mobile-eq-enabled') !== 'false'
+
+const eqBands = ref(
+  savedBands || EQ_FREQUENCIES.map((freq, i) => ({
+    freq,
+    gain: (EQ_PRESETS[savedPreset] || EQ_PRESETS.Flat)[i]
+  }))
+)
+const eqPreset = ref(savedPreset)
+const eqEnabled = ref(savedEnabled)
+
+let audioContext = null
+let sourceNode = null
+let eqGainNode = null
+let filterNodes = []
+let eqInitialized = false
+
+function initPhoneEQ() {
+  if (eqInitialized) return
+  eqInitialized = true
+
+  audioContext = new (window.AudioContext || window.webkitAudioContext)()
+  sourceNode = audioContext.createMediaElementSource(audio)
+  eqGainNode = audioContext.createGain()
+
+  filterNodes = EQ_FREQUENCIES.map((freq, i) => {
+    const filter = audioContext.createBiquadFilter()
+    filter.type = i === 0 ? 'lowshelf' : i === 9 ? 'highshelf' : 'peaking'
+    filter.frequency.value = freq
+    if (filter.type === 'peaking') filter.Q.value = 1.4
+    filter.gain.value = eqEnabled.value ? eqBands.value[i].gain : 0
+    return filter
+  })
+
+  let prev = sourceNode
+  for (const filter of filterNodes) {
+    prev.connect(filter)
+    prev = filter
+  }
+  prev.connect(eqGainNode)
+  eqGainNode.connect(audioContext.destination)
+  audio.volume = 1
+}
+
+function saveEqState() {
+  localStorage.setItem('mp-mobile-eq-bands', JSON.stringify(eqBands.value))
+  localStorage.setItem('mp-mobile-eq-preset', eqPreset.value)
+  localStorage.setItem('mp-mobile-eq-enabled', String(eqEnabled.value))
+}
+
+function setEqBand(index, gain) {
+  eqBands.value[index].gain = gain
+  if (filterNodes[index] && eqEnabled.value) {
+    filterNodes[index].gain.value = gain
+  }
+  eqPreset.value = 'Custom'
+  saveEqState()
+}
+
+function setEqPreset(name) {
+  const gains = EQ_PRESETS[name]
+  if (!gains) return
+  eqPreset.value = name
+  for (let i = 0; i < 10; i++) {
+    eqBands.value[i].gain = gains[i]
+    if (filterNodes[i]) {
+      filterNodes[i].gain.value = eqEnabled.value ? gains[i] : 0
+    }
+  }
+  saveEqState()
+}
+
+function toggleEq() {
+  eqEnabled.value = !eqEnabled.value
+  for (let i = 0; i < filterNodes.length; i++) {
+    filterNodes[i].gain.value = eqEnabled.value ? eqBands.value[i].gain : 0
+  }
+  saveEqState()
+}
 
 function baseURL() {
   return `http://${pcIP.value}:${httpPort.value}`
@@ -106,6 +205,8 @@ function connect(rawIp) {
     connectError.value = ''
     hasConnectedOnce = true
     startProgressTick()
+    // Request playlists
+    send('getPlaylists')
   }
 
   ws.onmessage = (event) => {
@@ -113,8 +214,15 @@ function connect(rawIp) {
       const msg = JSON.parse(event.data)
       if (msg.type === 'library') {
         library.value = msg.data
+      } else if (msg.type === 'playlists') {
+        playlists.value = msg.data || []
       } else if (msg.type === 'state') {
         const s = msg.data
+        // Check if this is a playlists response
+        if (s.type === 'playlists') {
+          playlists.value = s.data || []
+          return
+        }
         currentTrack.value = s.currentTrack
         isPlaying.value = s.isPlaying
         duration.value = s.duration
@@ -123,12 +231,12 @@ function connect(rawIp) {
         activeDevice.value = s.activeDevice
         queueLength.value = s.queueLength || 0
         currentIndex.value = s.currentIndex ?? -1
+        upNext.value = s.upNext || []
 
         // Smooth progress: anchor from server, interpolate locally
         if (activeDevice.value === 'pc') {
           lastServerProgress = s.progress
           lastServerTime = Date.now()
-          // Only hard-set progress if it drifted more than 2s (seek or track change)
           if (Math.abs(progress.value - s.progress) > 2) {
             progress.value = s.progress
           }
@@ -141,6 +249,10 @@ function connect(rawIp) {
 
         // Phone streaming
         if (s.activeDevice === 'phone' && s.currentTrack) {
+          // Init EQ on first phone play
+          if (!eqInitialized) initPhoneEQ()
+          if (audioContext?.state === 'suspended') audioContext.resume()
+
           const audioSrc = `${baseURL()}/audio/${s.currentTrack.id}`
           if (audio.src !== audioSrc) {
             audio.src = audioSrc
@@ -216,6 +328,11 @@ const filteredSongs = computed(() => {
   )
 })
 
+// ─── Artist consolidation (case-insensitive) ───
+function normalizeArtistName(name) {
+  return name.trim().replace(/\s+/g, ' ')
+}
+
 // Albums
 const albums = computed(() => {
   const map = {}
@@ -227,14 +344,33 @@ const albums = computed(() => {
   return Object.values(map).sort((a, b) => a.name.localeCompare(b.name))
 })
 
-// Artists
+// Artists (consolidated — case-insensitive grouping)
 const artists = computed(() => {
   const map = {}
   for (const s of library.value) {
-    if (!map[s.artist]) map[s.artist] = { name: s.artist, songs: [] }
-    map[s.artist].songs.push(s)
+    const key = s.artist.toLowerCase().trim()
+    if (!map[key]) map[key] = { name: normalizeArtistName(s.artist), songs: [], albumSet: new Set() }
+    map[key].songs.push(s)
+    map[key].albumSet.add(s.album)
+    // Use the most common casing (first occurrence wins)
   }
-  return Object.values(map).sort((a, b) => a.name.localeCompare(b.name))
+  return Object.values(map)
+    .map(a => ({ name: a.name, songs: a.songs, albumCount: a.albumSet.size }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+})
+
+// Genres
+const genres = computed(() => {
+  const map = {}
+  for (const s of library.value) {
+    const key = s.genre || 'Other'
+    if (!map[key]) map[key] = { name: key, songs: [], artistSet: new Set() }
+    map[key].songs.push(s)
+    map[key].artistSet.add(s.artist)
+  }
+  return Object.values(map)
+    .map(g => ({ name: g.name, songs: g.songs, artistCount: g.artistSet.size }))
+    .sort((a, b) => a.name.localeCompare(b.name))
 })
 
 function formatTime(secs) {
@@ -250,6 +386,57 @@ function formatDuration(ms) {
   const m = Math.floor(totalSec / 60)
   const s = totalSec % 60
   return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+// ─── Generate Similar ───
+function generateSimilar(song) {
+  const srcGenre = (song.genre || '').toLowerCase()
+  const srcArtist = song.artist.toLowerCase()
+  const srcAlbum = song.album.toLowerCase()
+  const srcGenreParts = srcGenre.split(/[,;\/&]+/).map(g => g.trim()).filter(Boolean)
+
+  const scored = library.value
+    .filter(s => s.id !== song.id)
+    .map(s => {
+      let score = 0
+      const genre = (s.genre || '').toLowerCase()
+      const artist = s.artist.toLowerCase()
+      const album = s.album.toLowerCase()
+
+      if (genre === srcGenre && srcGenre !== 'unknown' && srcGenre !== 'other') score += 10
+      else if (srcGenreParts.length > 0) {
+        const genreParts = genre.split(/[,;\/&]+/).map(g => g.trim())
+        for (const gp of genreParts) {
+          if (srcGenreParts.includes(gp) && gp !== 'unknown') score += 5
+        }
+      }
+      if (artist === srcArtist) score += 3
+      if (album === srcAlbum && srcAlbum !== 'unknown album') score += 2
+      if (song.duration && s.duration) {
+        if (Math.abs(song.duration - s.duration) < 60000) score += 1
+      }
+      return { song: s, score, artist }
+    })
+    .filter(s => s.score > 0)
+    .sort((a, b) => b.score - a.score || Math.random() - 0.5)
+
+  const result = []
+  const artistCount = {}
+  for (const entry of scored) {
+    const count = artistCount[entry.artist] || 0
+    if (count >= 3) continue
+    artistCount[entry.artist] = count + 1
+    result.push(entry.song)
+    if (result.length >= 30) break
+  }
+
+  // Shuffle for variety
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]]
+  }
+
+  return result
 }
 
 // ─── Download All ───
@@ -345,6 +532,7 @@ export function useRemote() {
     // State
     library, currentTrack, isPlaying, progress, duration,
     volume, shuffled, repeatMode, activeDevice, queueLength, currentIndex,
+    upNext, playlists,
     // Actions
     send,
     play: () => send('toggle'),
@@ -353,22 +541,35 @@ export function useRemote() {
     next: () => send('next'),
     prev: () => send('prev'),
     seek: (time) => {
-      progress.value = time // instant local update
+      progress.value = time
       lastServerProgress = time
       lastServerTime = Date.now()
       send('seek', { time })
     },
     setVolume: (v) => {
       volume.value = v
-      volumeLocalUntil = Date.now() + 1500 // ignore server volume for 1.5s
+      volumeLocalUntil = Date.now() + 1500
       send('setVolume', { volume: v })
     },
     toggleShuffle: () => send('toggleShuffle'),
     toggleRepeat: () => send('toggleRepeat'),
     playTrack: (songId) => send('playTrack', { songId }),
+    playAll: (startIndex) => send('playAll', { startIndex }),
+    playNext: (songId) => send('playNext', { songId }),
+    addToQueue: (songId) => send('addToQueue', { songId }),
     transferTo: (device) => send('transfer', { device }),
-    // Library
-    search, filteredSongs, albums, artists,
+    // Playlists
+    getPlaylists: () => send('getPlaylists'),
+    createPlaylist: (name) => send('createPlaylist', { name }),
+    deletePlaylist: (playlistId) => send('deletePlaylist', { playlistId }),
+    addToPlaylist: (playlistId, songId) => send('addToPlaylist', { playlistId, songId }),
+    // Library views
+    search, filteredSongs, albums, artists, genres,
+    // Generate Similar
+    generateSimilar,
+    // EQ
+    eqBands, eqPreset, eqEnabled, EQ_PRESETS, EQ_FREQUENCIES,
+    setEqBand, setEqPreset, toggleEq,
     // Helpers
     formatTime, formatDuration,
     baseURL,
