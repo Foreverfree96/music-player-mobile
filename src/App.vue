@@ -175,12 +175,18 @@
             :key="track.id + '-' + i"
             class="song-item"
             :class="{ active: false }"
+            @click="playTrack(track.id)"
+            @contextmenu.prevent="openContextMenu($event, track)"
+            @touchstart="startLongPress($event, track)"
+            @touchend="cancelLongPress()"
+            @touchmove="cancelLongPress()"
           >
             <div class="queue-num">{{ i + 1 }}</div>
             <div class="song-info">
               <div class="song-title">{{ track.title }}</div>
               <div class="song-artist">{{ track.artist }}</div>
             </div>
+            <button class="song-menu-btn" @click.stop="openContextMenu($event, track)">⋮</button>
             <div class="song-duration">{{ formatDuration(track.duration) }}</div>
           </div>
         </template>
@@ -357,9 +363,19 @@
           <span class="eq-chevron">{{ showPlayerQueue ? '▲' : '▼' }}</span>
         </div>
         <div v-if="showPlayerQueue" class="player-queue">
-          <div v-for="(track, i) in upNext" :key="track.id + '-q-' + i" class="pq-item">
+          <div
+            v-for="(track, i) in upNext"
+            :key="track.id + '-q-' + i"
+            class="pq-item"
+            @click="playTrack(track.id)"
+            @contextmenu.prevent="openContextMenu($event, track)"
+            @touchstart="startLongPress($event, track)"
+            @touchend="cancelLongPress()"
+            @touchmove="cancelLongPress()"
+          >
             <span class="pq-title">{{ track.title }}</span>
             <span class="pq-artist">{{ track.artist }}</span>
+            <button class="song-menu-btn pq-menu" @click.stop="openContextMenu($event, track)">⋮</button>
           </div>
         </div>
       </div>
@@ -1056,8 +1072,11 @@ button { font-family: inherit; }
   padding: 8px 4px; border-bottom: 1px solid #111;
   font-size: 13px;
 }
+.pq-item { cursor: pointer; }
+.pq-item:active { background: var(--bg-card); }
 .pq-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pq-artist { color: var(--text-muted); font-size: 12px; margin-left: 8px; flex-shrink: 0; }
+.pq-menu { width: 24px; height: 24px; font-size: 16px; margin-left: 4px; }
 
 /* Download Button */
 .download-btn {
